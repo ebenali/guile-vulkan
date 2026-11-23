@@ -149,6 +149,12 @@ Run from the repository root:
   rotate the view, Esc quits. It needs only libX11; the Xlib bindings are in
   `examples/x11.scm`, which describes X's event structs with
   `define-vk-struct`.
+- [`examples/cube`](examples/cube): `guile -L . examples/cube/cube.scm
+  [--device N] [--novsync]` draws a spinning, lit, λ-textured cube in a
+  native Wayland window. It needs only libwayland-client: `examples/wayland.scm`
+  builds the xdg-shell interface tables in Scheme and receives events
+  through `procedure->pointer` callbacks. It shows texture upload with
+  mipmaps, a sampler and a descriptor set.
 
 Tests, also run from the repository root: `guile -L . tests/compute.scm
 [device-index]` checks every `(vulkan compute)` operation against plain
