@@ -1,0 +1,9 @@
+# Generated files: collapsed in GitHub diffs and left out of language stats.
+vulkan.scm linguist-generated=true
+vulkan/xlib.scm linguist-generated=true
+vulkan/xcb.scm linguist-generated=true
+vulkan/wayland.scm linguist-generated=true
+vulkan/win32.scm linguist-generated=true
+
+# Compiled shaders.
+*.spv binary
