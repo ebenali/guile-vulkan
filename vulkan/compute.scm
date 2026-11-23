@@ -13,7 +13,11 @@
 ;;; reading a tensor back (tensor->f32vector, tensor->list) or
 ;;; compute-flush! submits everything recorded and waits.  Tensors are
 ;;; freed by the garbage collector (or tensor-free!), once the GPU is done
-;;; with them.
+;;; with them.  The collector does not see GPU memory, so a collection is
+;;; forced to free the unreferenced ones after every gc-threshold-bytes of
+;;; tensors, when the live allocations near the device's limit (as low as
+;;; 4096 on some drivers), and when an allocation fails for lack of memory
+;;; or of allocations.
 ;;;
 ;;; The context (device, queue, ...) is created on first use, on the most
 ;;; capable device; make-compute-context and current-compute-context choose
@@ -30,6 +34,7 @@
   #:use-module (srfi srfi-11)
   #:use-module (ice-9 match)
   #:export (make-compute-context compute-context? compute-context-device-name
+            compute-context-allocation-count
             current-compute-context default-compute-context
             compute-flush! compute-context-destroy!
             make-tensor tensor? tensor-shape tensor-size tensor-context
@@ -95,7 +100,11 @@
   (to-release context-to-release set-context-to-release!) ; thunks run after the next flush
   (guardian context-guardian set-context-guardian!)
   (sets-allocated context-sets-allocated set-context-sets-allocated!) ; since the last flush
-  (live-tensors context-live-tensors set-context-live-tensors!)       ; weak: freed on destroy
+  (bytes-allocated context-bytes-allocated set-context-bytes-allocated!) ; since the last collection
+  (allocation-count compute-context-allocation-count set-context-allocation-count!) ; live vkAllocateMemory blocks
+  (max-allocations context-max-allocations set-context-max-allocations!)
+  (live-tensors context-live-tensors set-context-live-tensors!)       ; weak: marked freed on destroy
+  (buffers context-buffers set-context-buffers!)                    ; every live buffer -> memory
   (destroyed? context-destroyed? set-context-destroyed?!))
 
 (define (device-type-rank type)                     ; lower is better
@@ -115,10 +124,11 @@
                                  vk:queue-compute-bit))
             (iota n)))))
 
-(define* (make-compute-context #:key device)
+(define* (make-compute-context #:key device max-allocations)
   "Create a compute context on the Vulkan device with index DEVICE, or by
 default on the most capable device with a compute queue (a discrete GPU
-before an integrated one, before a software renderer)."
+before an integrated one, before a software renderer).  MAX-ALLOCATIONS
+lowers the device's limit on live memory allocations (for testing)."
   (let* ((instance
           (create 'vkCreateInstance
                   (lambda (out)
@@ -221,7 +231,13 @@ before an integrated one, before a software renderer)."
     (set-context-to-release! ctx '())
     (set-context-guardian! ctx (make-guardian))
     (set-context-sets-allocated! ctx 0)
+    (set-context-bytes-allocated! ctx 0)
+    (set-context-allocation-count! ctx 0)
+    (set-context-max-allocations!
+     ctx (let ((limit (vk-ref vk:physical-device-properties (limits max-memory-allocation-count) (properties pd))))
+           (if max-allocations (min limit max-allocations) limit)))
     (set-context-live-tensors! ctx (make-weak-key-hash-table))
+    (set-context-buffers! ctx (make-hash-table))
     (set-context-destroyed?! ctx #f)
     ctx))
 
@@ -261,23 +277,35 @@ else one made on first use with make-compute-context's default device."
                                              #f out))))
          (reqs (make-vk vk:memory-requirements)))
     (vk:get-buffer-memory-requirements device buffer reqs)
-    (let ((memory (create 'vkAllocateMemory
-                          (lambda (out)
-                            (vk:allocate-memory
-                             device
-                             (vk-new vk:memory-allocate-info
-                                     (s-type vk:structure-type-memory-allocate-info)
-                                     (allocation-size (vk-ref vk:memory-requirements (size) reqs))
-                                     (memory-type-index
-                                      (find-memory-type ctx (vk-ref vk:memory-requirements (memory-type-bits) reqs)
-                                                        properties)))
-                             #f out)))))
-      (check 'vkBindBufferMemory (vk:bind-buffer-memory device buffer memory 0))
-      (values buffer memory))))
+    (let* ((slot (make-bytevector 8 0))
+           (r (vk:allocate-memory
+               device
+               (vk-new vk:memory-allocate-info
+                       (s-type vk:structure-type-memory-allocate-info)
+                       (allocation-size (vk-ref vk:memory-requirements (size) reqs))
+                       (memory-type-index
+                        (find-memory-type ctx (vk-ref vk:memory-requirements (memory-type-bits) reqs)
+                                          properties)))
+               #f slot)))
+      (cond
+       ((= r vk:success)
+        (let ((memory (bytevector-u64-native-ref slot 0)))
+          (set-context-allocation-count! ctx (+ 1 (compute-context-allocation-count ctx)))
+          (hashv-set! (context-buffers ctx) buffer memory)
+          (check 'vkBindBufferMemory (vk:bind-buffer-memory device buffer memory 0))
+          (values buffer memory)))
+       ;; Out of memory, or of allocations: let the caller collect and retry.
+       ((memv r (list vk:error-out-of-device-memory vk:error-out-of-host-memory
+                      vk:error-too-many-objects))
+        (vk:destroy-buffer device buffer #f)
+        (values #f #f))
+       (else (check 'vkAllocateMemory r))))))
 
 (define (free-buffer ctx buffer memory)
   (vk:destroy-buffer (context-device ctx) buffer #f)
-  (vk:free-memory (context-device ctx) memory #f))
+  (vk:free-memory (context-device ctx) memory #f)
+  (hashv-remove! (context-buffers ctx) buffer)
+  (set-context-allocation-count! ctx (- (compute-context-allocation-count ctx) 1)))
 
 ;; A host-visible buffer of SIZE bytes => (values buffer memory mapped-bytevector).
 (define (make-staging-buffer ctx size usage)
@@ -285,6 +313,7 @@ else one made on first use with make-compute-context's default device."
       (lambda () (make-buffer ctx size usage (logior vk:memory-property-host-visible-bit
                                                      vk:memory-property-host-coherent-bit)))
     (lambda (buffer memory)
+      (unless buffer (error "out of host-visible Vulkan memory for" size 'bytes))
       (let ((address (create 'vkMapMemory
                              (lambda (out) (vk:map-memory (context-device ctx) memory 0 vk:whole-size 0 out)))))
         (values buffer memory (vk-bytevector address size))))))
@@ -364,8 +393,12 @@ waited for the GPU to finish (staging buffers, collected tensors)."
     (compute-flush! ctx)
     (let ((device (context-device ctx)))
       (check 'vkDeviceWaitIdle (vk:device-wait-idle device))
-      ;; Tensors still referenced: free their memory; using them is an error now.
-      (hash-for-each (lambda (t _) (release-tensor! t)) (context-live-tensors ctx))
+      ;; Every buffer still allocated, whether its tensor is referenced, was
+      ;; collected or waits in the guardian; tensors still referenced are
+      ;; marked freed, so using them is an error.
+      (hash-for-each (lambda (t _) (forget-tensor-memory! t)) (context-live-tensors ctx))
+      (for-each (match-lambda ((buffer . memory) (free-buffer ctx buffer memory)))
+                (hash-map->list cons (context-buffers ctx)))
       (hash-for-each (lambda (name k) (destroy-kernel ctx k)) (context-kernels ctx))
       (vk:destroy-descriptor-pool device (context-descriptor-pool ctx) #f)
       (vk:destroy-fence device (context-fence ctx) #f)
@@ -541,23 +574,53 @@ waited for the GPU to finish (staging buffers, collected tensors)."
 (define (live-buffer t)
   (or (tensor-buffer (or (tensor-base t) t)) (error "tensor was freed" t)))
 
+;; (Called from compute-context-destroy!, above the record type.)
+(define (forget-tensor-memory! t)
+  (set-tensor-buffer! t #f)
+  (set-tensor-memory! t #f))
+
 (define (release-tensor! t)
   (when (tensor-buffer t)
     (free-buffer (tensor-context t) (tensor-buffer t) (tensor-memory t))
     (set-tensor-buffer! t #f)
     (set-tensor-memory! t #f)))
 
+;; The collector cannot see GPU memory: after this many bytes of tensors,
+;; a collection is forced (and its garbage freed by a flush).
+(define gc-threshold-bytes (* 256 1024 1024))
+
+(define (collect-garbage! ctx)
+  (set-context-bytes-allocated! ctx 0)
+  (gc)
+  (compute-flush! ctx))                 ; frees the tensors the collector found
+
 ;; An uninitialized tensor of SHAPE on CTX.
 (define (allocate-tensor ctx shape)
   (check-shape shape)
-  (let ((size (shape-size shape)))
+  (let* ((size (shape-size shape))
+         (bytes (* 4 size))
+         (allocate (lambda ()
+                     (make-buffer ctx bytes
+                                  (logior vk:buffer-usage-storage-buffer-bit
+                                          vk:buffer-usage-transfer-src-bit
+                                          vk:buffer-usage-transfer-dst-bit)
+                                  vk:memory-property-device-local-bit))))
+    (set-context-bytes-allocated! ctx (+ bytes (context-bytes-allocated ctx)))
+    (when (or (> (context-bytes-allocated ctx) gc-threshold-bytes)
+              ;; Leave a quarter of the allocations for staging buffers and slack.
+              (>= (* 4 (compute-context-allocation-count ctx)) (* 3 (context-max-allocations ctx))))
+      (collect-garbage! ctx))
     (call-with-values
-        (lambda () (make-buffer ctx (* 4 size)
-                                (logior vk:buffer-usage-storage-buffer-bit
-                                        vk:buffer-usage-transfer-src-bit
-                                        vk:buffer-usage-transfer-dst-bit)
-                                vk:memory-property-device-local-bit))
+        (lambda ()
+          (call-with-values allocate
+            (lambda (buffer memory)
+              (if buffer
+                  (values buffer memory)
+                  (begin (collect-garbage! ctx)      ; out of memory: free garbage, retry once
+                         (allocate))))))
       (lambda (buffer memory)
+        (unless buffer
+          (error "out of GPU memory for a tensor of" shape))
         (let ((t (%make-tensor ctx shape size buffer memory #f)))
           ((context-guardian ctx) t)
           (hash-set! (context-live-tensors ctx) t #t)

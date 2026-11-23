@@ -120,6 +120,35 @@
                           (make-tensor '(5)) (iota 2500)))
       (make-list 5 2500.0))
 
+;; 200 temporaries of 64 MB each, never freed by hand: 12.8 GB in all, more
+;; than any GPU here.  The forced collections must reclaim them.
+(test "200 x 64 MB temporaries"
+      (tensor->list (fold (lambda (i t)
+                            (make-tensor (list (* 16 1024 1024)) #:fill (exact->inexact i))
+                            (tensor-add-scalar t 1.0))
+                          (make-tensor '(3)) (iota 200)))
+      (make-list 3 200.0))
+
+;; Thousands of small tensors on a device allowing only 4096 live
+;; allocations (common on Windows).  make-tensor records no descriptor sets,
+;; so nothing else flushes: only the allocation count can trigger the
+;; collections that keep it under the limit.
+(let* ((limited (make-compute-context #:device (and (pair? (cdr (command-line)))
+                                                     (string->number (cadr (command-line))))
+                                       #:max-allocations 4096))
+       (peak 0))
+  (parameterize ((current-compute-context limited))
+    (for-each (lambda (i)
+                (make-tensor '(4) #:context limited)
+                (set! peak (max peak (compute-context-allocation-count limited))))
+              (iota 6000))
+    (test "6000 small tensors under a 4096-allocation limit"
+          (tensor->list (make-tensor '(2) #:fill 7.0 #:context limited)) '(7.0 7.0)))
+  (unless (<= peak 4096)
+    (set! failures (+ failures 1))
+    (format #t "FAIL   live allocations peaked at ~a~%" peak))
+  (compute-context-destroy! limited))
+
 ;; More elements than 65535 workgroups of 256: the grid-stride loops.
 (let* ((n 20000000)
        (v (tensor->f32vector (tensor-add-scalar (make-tensor (list n) #:fill 2.0) 1.0))))

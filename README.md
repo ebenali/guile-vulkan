@@ -114,6 +114,12 @@ Operations are queued on the GPU rather than run one by one. Reading a
 result (`tensor->f32vector`, `tensor->list`) or calling `compute-flush!`
 submits everything queued and waits. Tensors are freed by the garbage
 collector, once the GPU is done with them, or with `tensor-free!`.
+Guile's collector doesn't see GPU memory, so the module forces a collection
+to free unreferenced tensors in three cases: after every 256 MiB of tensors
+allocated; when the number of live allocations nears the device's limit
+(which can be as low as 4096, common on Windows); and when an allocation
+fails for lack of memory or of allocations. `tensor-free!` releases memory
+sooner, which is useful for large tensors.
 
 A context (device and queue) is created on first use, on the most capable
 device: a discrete GPU first, then integrated, then a software renderer.
@@ -133,10 +139,12 @@ The shaders are in `shaders/*.comp`. `guile shaders/build.scm` compiles them
 
 Run from the repository root:
 
-- `guile -L . examples/compute/compute.scm [device-index]`: squares 1000
-  floats with a compute shader and checks the result.
-- `guile -L . examples/gears/gears.scm [--device N] [--novsync]`: the
-  classic three spinning gears in an X11 window (XWayland on Wayland
+- [`examples/compute`](examples/compute): `guile -L .
+  examples/compute/compute.scm [device-index]` squares 1000 floats with a
+  compute shader and checks the result.
+- [`examples/gears`](examples/gears): `guile -L .
+  examples/gears/gears.scm [--device N] [--novsync]` draws the classic three
+  spinning gears in an X11 window (XWayland on Wayland
   desktops), with Vulkan 1.3 dynamic rendering. Arrow keys and `z`/`Z`
   rotate the view, Esc quits. It needs only libX11; the Xlib bindings are in
   `examples/x11.scm`, which describes X's event structs with
