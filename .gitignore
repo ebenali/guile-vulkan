@@ -3,3 +3,5 @@ res/vulkan-win32.xml
 res/win32-include/
 *.go
 spirals.ppm
+guile-vulkan.info
+guile-vulkan.html

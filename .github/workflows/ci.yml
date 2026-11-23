@@ -1,0 +1,124 @@
+# Regenerates the bindings, runs the tests and examples on Mesa's software
+# Vulkan driver (lavapipe) under Xvfb and a headless Weston, checks the API
+# against chez-vulkan, and builds the manual.  Checkouts are pinned to
+# commits, actions too.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  VULKAN_HEADERS_COMMIT: 6802bb4733b63ed5efd3adb308a6c885ef180ea1 # v1.4.363
+  CHEZ_VULKAN_COMMIT: fb7bb1d790ab71b2be686b6b388d9e47b0f5d8c8
+  VALIDATE: VK_LAYER_KHRONOS_validation
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        # Explicitly bash: -eo pipefail, so `guile ... | tee` fails when guile does.
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check out the Vulkan headers the bindings were generated from
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: KhronosGroup/Vulkan-Headers
+          ref: ${{ env.VULKAN_HEADERS_COMMIT }}
+          path: vulkan-headers
+
+      - name: Check out chez-vulkan, to compare the APIs
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ebenali/chez-vulkan
+          ref: ${{ env.CHEZ_VULKAN_COMMIT }}
+          path: chez-vulkan
+
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            guile-3.0 guile-3.0-dev castxml texinfo \
+            libx11-dev libxrandr-dev libxcb1-dev libwayland-dev \
+            libvulkan1 mesa-vulkan-drivers vulkan-validationlayers xvfb weston
+
+      - name: Regenerate the bindings
+        run: |
+          castxml --castxml-gccxml -Ivulkan-headers/include \
+            -DVK_USE_PLATFORM_XLIB_KHR -DVK_USE_PLATFORM_XLIB_XRANDR_EXT \
+            -DVK_USE_PLATFORM_XCB_KHR -DVK_USE_PLATFORM_WAYLAND_KHR \
+            -o res/vulkan.xml vulkan-headers/include/vulkan/vulkan.h
+          guile generate.scm
+
+      - name: The generated modules match the committed ones
+        run: git diff --exit-code --stat -- vulkan.scm vulkan/xlib.scm vulkan/xcb.scm vulkan/wayland.scm
+
+      - name: The API matches chez-vulkan's
+        run: guile tests/compare-with-chez-vulkan.scm chez-vulkan/vulkan.ss
+
+      - name: Compile the modules
+        run: |
+          echo "GUILE_LOAD_COMPILED_PATH=$PWD/.go" >> "$GITHUB_ENV"
+          for f in vulkan/runtime.scm vulkan/constants.scm vulkan.scm vulkan/xlib.scm vulkan/xcb.scm \
+                   vulkan/wayland.scm vulkan/win32.scm vulkan/compute/shaders.scm vulkan/compute.scm \
+                   examples/common.scm examples/math.scm examples/x11.scm examples/wayland.scm; do
+            guild compile -L . -o ".go/${f%.scm}.go" "$f" > /dev/null
+          done
+
+      - name: (vulkan compute) tests (lavapipe, validation layer)
+        run: |
+          VK_INSTANCE_LAYERS=$VALIDATE guile -L . tests/compute.scm 2>&1 | tee compute-test.txt
+          ! grep -q 'Validation Error' compute-test.txt
+
+      - name: Compute example (lavapipe, validation layer)
+        run: |
+          VK_INSTANCE_LAYERS=$VALIDATE guile -L . examples/compute/compute.scm 2>&1 | tee compute.txt
+          grep -q '1000/1000 elements correct' compute.txt
+          ! grep -q 'Validation Error' compute.txt
+
+      - name: Spirals example (lavapipe, validation layer)
+        run: |
+          VK_INSTANCE_LAYERS=$VALIDATE \
+            guile -L . examples/spirals/spirals.scm --steps 300 2>&1 | tee spirals.txt
+          # Training must have learned: at least 95% accuracy after 300 steps.
+          grep -E '^step +300 ' spirals.txt | grep -qE 'accuracy (9[5-9]|100)\.'
+          head -c 2 spirals.ppm | grep -q P6
+          ! grep -q 'Validation Error' spirals.txt
+
+      - name: Gears example (Xvfb, lavapipe, validation layer)
+        run: |
+          VK_INSTANCE_LAYERS=$VALIDATE \
+            xvfb-run -a guile -L . examples/gears/gears.scm --frames 60 2>&1 | tee gears.txt
+          ! grep -q 'Validation Error' gears.txt
+
+      - name: XCB surface test (Xvfb, lavapipe)
+        run: xvfb-run -a guile -L . tests/xcb-surface.scm
+
+      - name: Wayland test and cube example (headless Weston, lavapipe, validation layer)
+        run: |
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/xdg" WAYLAND_DISPLAY=wayland-ci
+          mkdir -m 700 -p "$XDG_RUNTIME_DIR"
+          weston --backend=headless --socket=wayland-ci --idle-time=0 > weston.log 2>&1 &
+          weston_pid=$!
+          for i in $(seq 100); do [ -S "$XDG_RUNTIME_DIR/wayland-ci" ] && break; sleep 0.1; done
+          VK_INSTANCE_LAYERS=$VALIDATE guile -L . tests/wayland-presentation.scm
+          VK_INSTANCE_LAYERS=$VALIDATE \
+            timeout 300 guile -L . examples/cube/cube.scm --frames 60 2>&1 | tee cube.txt
+          ! grep -q 'Validation Error' cube.txt
+          kill "$weston_pid"
+
+      - name: Build the manual
+        run: |
+          makeinfo -o guile-vulkan.info doc/guile-vulkan.texi
+          makeinfo --html --no-split -o guile-vulkan.html doc/guile-vulkan.texi
+
+      - name: Weston log
+        if: failure()
+        run: cat weston.log || true

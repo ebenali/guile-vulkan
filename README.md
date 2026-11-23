@@ -1,5 +1,9 @@
 # guile-vulkan
 
+[![CI](https://github.com/ebenali/guile-vulkan/actions/workflows/ci.yml/badge.svg)](https://github.com/ebenali/guile-vulkan/actions/workflows/ci.yml)
+
+![A spinning cube with a λ on each face, drawn by guile-vulkan in a native Wayland window](doc/cube.gif)
+
 Vulkan 1.4 bindings for [GNU Guile](https://www.gnu.org/software/guile/),
 generated from the Vulkan headers. They need nothing beyond Guile 3 and a
 Vulkan loader: no C compiler and no third-party Guile libraries.
@@ -7,6 +11,15 @@ Vulkan loader: no C compiler and no third-party Guile libraries.
 Names, layouts and generation rules follow
 [chez-vulkan](https://github.com/ebenali/chez-vulkan), so code ports between
 the two easily.
+
+## Documentation
+
+The manual, `doc/guile-vulkan.texi`, covers installation, the struct and
+pointer API, functions, the window systems and `(vulkan compute)` in full.
+The Guix package installs it (`info guile-vulkan`); from a checkout, build
+it with `makeinfo doc/guile-vulkan.texi` and read it with
+`info -f ./guile-vulkan.info`, or build HTML with
+`makeinfo --html --no-split doc/guile-vulkan.texi`.
 
 ## Modules
 
@@ -166,6 +179,10 @@ Tests, also run from the repository root: `guile -L . tests/compute.scm
 [device-index]` checks every `(vulkan compute)` operation against plain
 Guile. `tests/xcb-surface.scm` (for example under `xvfb-run`) and
 `tests/wayland-presentation.scm` check the window-system modules.
+`guile tests/compare-with-chez-vulkan.scm path/to/chez-vulkan/vulkan.ss`
+checks that the bindings match chez-vulkan's. CI runs all of them, and the
+examples, on Mesa's software Vulkan driver (lavapipe) under Xvfb and a
+headless Weston.
 
 A Guix package for this checkout: `guix build -f guix.scm`.
 

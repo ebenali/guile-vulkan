@@ -1,0 +1,697 @@
+\input texinfo   @c -*- texinfo -*-
+@c %**start of header
+@setfilename guile-vulkan.info
+@documentencoding UTF-8
+@settitle Guile-Vulkan Reference Manual
+@c %**end of header
+
+@set VERSION 0.1.0
+@set VULKAN 1.4.363
+
+@copying
+This manual documents Guile-Vulkan @value{VERSION}, Vulkan bindings for
+GNU Guile.
+
+Copyright @copyright{} 2026 the Guile-Vulkan contributors.
+
+This manual is part of Guile-Vulkan.  It is free software: you can
+redistribute it and/or modify it under the terms of the GNU Lesser
+General Public License as published by the Free Software Foundation,
+either version 3 of the License, or (at your option) any later version.
+@end copying
+
+@dircategory Guile libraries
+@direntry
+* Guile-Vulkan: (guile-vulkan).   Vulkan graphics and compute for GNU Guile.
+@end direntry
+
+@titlepage
+@title Guile-Vulkan Reference Manual
+@subtitle Vulkan bindings for GNU Guile
+@subtitle For Guile-Vulkan @value{VERSION}
+@page
+@vskip 0pt plus 1filll
+@insertcopying
+@end titlepage
+
+@contents
+
+@ifnottex
+@node Top
+@top Guile-Vulkan
+
+This manual documents Guile-Vulkan @value{VERSION}: bindings to the
+Vulkan @value{VULKAN} graphics and compute API for GNU Guile, generated
+from the Vulkan headers, and @code{(vulkan compute)}, a small library
+of GPU tensors built on them.
+
+@insertcopying
+@end ifnottex
+
+@menu
+* Introduction::            What Guile-Vulkan is.
+* Installation::            Getting it running.
+* Using the Bindings::      Names, structs, pointers, functions.
+* GPU Tensors::             The @code{(vulkan compute)} module.
+* Examples::                The programs in @file{examples/}.
+* Regenerating::            Making the bindings from the headers.
+* Procedure Index::
+* Concept Index::
+@end menu
+
+@c ====================================================================
+@node Introduction
+@chapter Introduction
+
+@cindex Vulkan
+Vulkan is the cross-platform API for GPU graphics and compute.
+Guile-Vulkan makes all of it available to Guile programs: every type,
+constant and function of Vulkan @value{VULKAN}, including the
+window-system extensions for X11 (Xlib and XCB), Wayland and Windows.
+
+The bindings need nothing beyond Guile 3 and a Vulkan loader: no C
+compiler and no other Guile libraries.  They are generated from the
+Vulkan headers, and follow the same names and rules as
+@uref{https://github.com/ebenali/chez-vulkan, chez-vulkan}, the bindings
+for Chez Scheme, so code ports easily between the two.
+
+On top of the bindings, @code{(vulkan compute)} provides GPU tensors:
+1-D and 2-D arrays of 32-bit floats in GPU memory, with the operations a
+small neural network needs (@pxref{GPU Tensors}).
+
+Some notable properties:
+
+@itemize
+@item
+Structs are bytevectors, and field access compiles to a direct
+bytevector access at a constant offset (@pxref{Structs}).
+
+@item
+Pointer fields and pointer arguments accept bytevectors, and keep them
+alive while Vulkan may use them, so nested structures can be built in
+one expression (@pxref{Pointers and Lifetimes}).
+
+@item
+Every function is available: those every Vulkan loader exports are bound
+directly, and every function can also be fetched at run time
+(@pxref{Functions}).
+@end itemize
+
+@c ====================================================================
+@node Installation
+@chapter Installation
+
+@cindex requirements
+Guile-Vulkan needs Guile 3.0 and a Vulkan loader (@file{libvulkan.so.1}
+on GNU/Linux, @file{vulkan-1.dll} on Windows, @file{libvulkan.1.dylib}
+on macOS), plus a Vulkan driver for the device you want to use.  The
+window-system examples also need the corresponding client library
+(libX11 or libwayland-client).
+
+@cindex Guix
+@section With Guix
+
+A Guix package definition for the source tree is in @file{guix.scm}:
+
+@example
+guix build -f guix.scm
+guix shell -f guix.scm -- guile -c '(use-modules (vulkan))'
+@end example
+
+The package finds the Vulkan loader through its store path.  Vulkan
+drivers are found as usual, for example Mesa's through
+@env{VK_DRIVER_FILES} or @env{XDG_DATA_DIRS}.
+
+@section From a checkout
+
+The modules can be used straight from the source tree by putting it on
+Guile's load path:
+
+@example
+guile -L /path/to/guile-vulkan
+@end example
+
+or by setting @env{GUILE_LOAD_PATH}.  The first time @code{(vulkan)} is
+loaded, Guile compiles it, which takes about 20 seconds; the compiled
+code is cached, and loading it afterwards takes milliseconds.
+
+@c ====================================================================
+@node Using the Bindings
+@chapter Using the Bindings
+
+@menu
+* Modules::                 What to import.
+* Names::                   How Vulkan names become Scheme names.
+* Structs::                 Structs as bytevectors.
+* Pointers and Lifetimes::  Pointers, strings and keeping objects alive.
+* Functions::               Calling Vulkan.
+* Constants::               @code{(vulkan constants)}.
+* Window Systems::          Surfaces for X11, Wayland and Windows.
+@end menu
+
+@node Modules
+@section Modules
+
+@table @code
+@item (vulkan)
+Every Vulkan @value{VULKAN} type, constant and function, with the struct
+and pointer helpers of @ref{Structs} and @ref{Pointers and Lifetimes}.
+
+@item (vulkan constants)
+The constants Vulkan defines with @code{#define}, which the generator
+cannot see (@pxref{Constants}).
+
+@item (vulkan xlib)
+@itemx (vulkan xcb)
+@itemx (vulkan wayland)
+@itemx (vulkan win32)
+The window-system extensions (@pxref{Window Systems}).
+
+@item (vulkan compute)
+GPU tensors (@pxref{GPU Tensors}).
+
+@item (vulkan runtime)
+The machinery behind the generated modules.  Its user-facing procedures
+are re-exported by @code{(vulkan)}; @code{define-vk-struct} is also
+useful for describing C structs of other libraries.
+@end table
+
+@node Names
+@section Names
+
+@cindex names
+Vulkan names become lower-case Scheme names with a @code{vk:} prefix,
+words separated by dashes:
+
+@multitable {@code{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO}} {@code{vk:structure-type-instance-create-info}}
+@headitem Vulkan @tab Scheme
+@item @code{vkCreateInstance} @tab @code{vk:create-instance}
+@item @code{VkInstanceCreateInfo} @tab @code{vk:instance-create-info}
+@item @code{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO} @tab @code{vk:structure-type-instance-create-info}
+@item @code{pApplicationInfo} @tab @code{p-application-info}
+@end multitable
+
+In a mixed-case name, a dash goes before every upper-case letter that
+does not follow another upper-case letter: @code{VkPhysicalDeviceIDProperties}
+becomes @code{vk:physical-device-idproperties}.  Struct fields follow the
+same rule without the prefix.
+
+A few structs would get the same name as an enum value, for example
+@code{VkPipelineCacheHeaderVersionOne} and
+@code{VK_PIPELINE_CACHE_HEADER_VERSION_ONE}; such structs get a
+@code{-struct} suffix (@code{vk:pipeline-cache-header-version-one-struct}).
+
+Only @code{vk:} names are exported.  The video codec types
+(@code{StdVideo@dots{}}) are used inside Vulkan structs but are not
+exported.
+
+@node Structs
+@section Structs
+
+@cindex structs
+@cindex bytevectors
+A Vulkan struct is a bytevector of the struct's size, laid out as in C.
+Each struct name, such as @code{vk:application-info}, is a macro that
+knows the struct's layout, so field access compiles to a direct
+bytevector access at a constant offset.  The layouts come from CastXML's
+reading of the Vulkan headers.
+
+Fields are named by a @dfn{path}: a list of field names, where a field
+holding a nested struct is followed by a field of that struct, and an
+array field is followed by an index (any expression).
+
+@deffn {Scheme Syntax} make-vk type [count]
+A zeroed bytevector for one @var{type}, or for @var{count} of them in a
+row.
+@end deffn
+
+@deffn {Scheme Syntax} vk-new type (field @dots{} value) @dots{}
+A zeroed @var{type} with the given fields set:
+
+@lisp
+(vk-new vk:application-info
+        (s-type vk:structure-type-application-info)
+        (p-application-name "my app")
+        (api-version vk:api-version-1-3))
+@end lisp
+
+A field may be a nested path: @code{(stage module m)} sets the
+@code{module} field of the struct in the @code{stage} field.
+@end deffn
+
+@deffn {Scheme Syntax} vk-ref type (path @dots{}) bv [index]
+@deffnx {Scheme Syntax} vk-set! type (path @dots{}) bv [index] value
+Read or set the field named by @var{path} in the struct @var{bv}.  With
+@var{index}, @var{bv} holds an array of @var{type} and element
+@var{index} is used:
+
+@lisp
+(vk-ref vk:physical-device-properties (limits max-image-dimension2-d) props)
+(vk-ref vk:physical-device-memory-properties
+        (memory-types i property-flags) props)
+(vk-ref vk:queue-family-properties (queue-flags) families 2)
+@end lisp
+
+Integer and floating-point fields are numbers, pointer and handle fields
+integers (setting them is described in @ref{Pointers and Lifetimes}).  C
+bitfields are read and set like other fields.
+@end deffn
+
+@deffn {Scheme Syntax} vk-sizeof type
+The size of @var{type} in bytes.
+@end deffn
+
+@deffn {Scheme Syntax} vk-offset type (path @dots{})
+The byte offset of a (possibly nested) field, for example to read the
+string in a fixed-size @code{char} array:
+
+@lisp
+(vk-c-string-ref props (vk-offset vk:physical-device-properties (device-name)))
+@end lisp
+@end deffn
+
+@cindex @code{define-vk-struct}
+@deffn {Scheme Syntax} define-vk-struct name size (field type offset) @dots{}
+Define @var{name} as a struct of @var{size} bytes, for use with the
+macros above.  The generated modules use it for every Vulkan struct; it
+is exported by @code{(vulkan runtime)} for describing C structs of other
+libraries, as the examples do for X11 events and Wayland's interface
+tables.  @var{type} is one of
+@code{(u8)}, @code{(s8)}, @code{(u16)}, @code{(s16)}, @code{(u32)},
+@code{(s32)}, @code{(u64)}, @code{(s64)}, @code{(f32)}, @code{(f64)},
+@code{(ptr)}, @code{(struct @var{name})}, @code{(array @var{n} @var{type})}
+or @code{(bits @var{unit} @var{shift} @var{width} @var{signed?})}.
+@end deffn
+
+@node Pointers and Lifetimes
+@section Pointers and Lifetimes
+
+@cindex pointers
+@cindex garbage collection
+Pointers and handles are integers.  Wherever Vulkan takes a pointer, a
+bytevector can be given instead, and it is kept alive for you:
+
+@itemize
+@item
+A pointer field set with @code{vk-set!} or @code{vk-new} accepts a
+bytevector, a string (stored as a NUL-terminated UTF-8 copy), @code{#f}
+(null) or an address.  A bytevector or string stays alive as long as the
+struct holding it, until the field is set again.  This makes nested
+@code{vk-new} forms safe:
+
+@lisp
+(vk:create-instance
+ (vk-new vk:instance-create-info
+         (s-type vk:structure-type-instance-create-info)
+         (p-application-info
+          (vk-new vk:application-info
+                  (s-type vk:structure-type-application-info)
+                  (api-version vk:api-version-1-3))))
+ #f slot)
+@end lisp
+
+@item
+A pointer or handle argument of a Vulkan function accepts a bytevector
+or @code{#f}, and the bytevector stays alive during the call.
+@end itemize
+
+An address given as an integer is not tracked: the object it points to
+must then be kept reachable while Vulkan may use it.  Guile's collector
+does not move objects, so addresses stay valid.
+
+@deffn {Scheme Procedure} vk-address bv
+The address of bytevector @var{bv}, as an integer.
+@end deffn
+
+@deffn {Scheme Procedure} vk-bytevector address size
+A bytevector over @var{size} bytes of foreign memory at @var{address},
+for example memory mapped with @code{vk:map-memory}.
+@end deffn
+
+@deffn {Scheme Procedure} vk-c-string string
+A bytevector holding @var{string} as NUL-terminated UTF-8.
+@end deffn
+
+@deffn {Scheme Procedure} vk-c-string-array strings
+A bytevector holding a C array of pointers to the @var{strings}, as
+@code{ppEnabledExtensionNames} wants.  The strings stay alive as long as
+the array does.
+@end deffn
+
+@deffn {Scheme Procedure} vk-c-string-ref bv [offset]
+The NUL-terminated UTF-8 string in @var{bv} starting at @var{offset}.
+@end deffn
+
+@node Functions
+@section Functions
+
+@cindex functions
+@cindex out parameters
+Vulkan functions are procedures taking the same arguments as in C, in
+the same order.  Results such as @code{VkResult} are integers, to compare
+with constants like @code{vk:success}.  Output parameters are
+bytevectors the function writes into:
+
+@lisp
+(define (create-instance info)
+  (let ((slot (make-bytevector 8 0)))
+    (unless (= vk:success (vk:create-instance info #f slot))
+      (error "vkCreateInstance failed"))
+    (bytevector-u64-native-ref slot 0)))
+@end lisp
+
+@cindex @code{vk:load-*} procedures
+@cindex extensions
+The functions every Vulkan loader exports (core 1.0--1.4 and the
+window-system functions) are bound directly under their names.  If the
+installed loader is older and lacks one, calling it raises an error.
+
+Every function, including those, also has a @code{vk:load-} procedure
+that fetches it at run time.  It returns a procedure, or @code{#f} if the
+function is not available (for example because its extension was not
+enabled):
+
+@lisp
+(define draw-mesh-tasks (vk:load-cmd-draw-mesh-tasks-ext device))
+(when draw-mesh-tasks
+  (draw-mesh-tasks command-buffer x y z))
+@end lisp
+
+Device-level functions (whose first parameter is a @code{VkDevice},
+@code{VkQueue} or @code{VkCommandBuffer}) take a device; the others take
+an instance, or @code{#f} for global functions such as
+@code{vkCreateInstance}.  Each call looks the function up again, so load
+it once and keep the result.
+
+@node Constants
+@section Constants
+
+@cindex constants
+The enum values and flags of the Vulkan headers are defined in
+@code{(vulkan)}.  The constants Vulkan defines with @code{#define} are in
+@code{(vulkan constants)}:
+
+@deffn {Scheme Procedure} vk:make-api-version variant major minor patch
+@deffnx {Scheme Procedure} vk:api-version-major version
+@deffnx {Scheme Procedure} vk:api-version-minor version
+@deffnx {Scheme Procedure} vk:api-version-patch version
+@deffnx {Scheme Procedure} vk:api-version-variant version
+Build an API version number, or take one apart.
+@end deffn
+
+It also defines @code{vk:api-version-1-0} through
+@code{vk:api-version-1-4}, @code{vk:header-version},
+@code{vk:true}, @code{vk:false}, @code{vk:whole-size},
+@code{vk:queue-family-ignored}, @code{vk:lod-clamp-none} and the other
+@code{VK_@dots{}} constants of the headers.
+
+The ``all ones'' constants, such as @code{VK_WHOLE_SIZE} (@code{~0ULL}),
+are given as unsigned numbers (@code{vk:whole-size} is
+@code{#xFFFFFFFFFFFFFFFF}), because Guile's FFI and bytevector setters
+reject negative numbers for unsigned types.  The same goes for arguments:
+an infinite timeout is @code{#xFFFFFFFFFFFFFFFF}.
+
+@node Window Systems
+@section Window Systems
+
+@cindex surfaces
+@cindex window systems
+@code{(vulkan xlib)}, @code{(vulkan xcb)}, @code{(vulkan wayland)} and
+@code{(vulkan win32)} hold each window system's surface structs and
+functions, such as @code{vk:wayland-surface-create-info-khr} and
+@code{vk:create-wayland-surface-khr}.  They import @code{(vulkan)} for its
+types.
+
+@cindex Vulkan loader
+The modules load the Vulkan loader under its name on each platform:
+@file{libvulkan.so.1} on GNU/Linux and other Unix systems,
+@file{vulkan-1.dll} on Windows, and @file{libvulkan.1.dylib} (falling
+back to MoltenVK) on macOS.
+
+Opening the window is up to the program; the examples show how to do it
+with only Xlib (@file{examples/x11.scm}) or only libwayland-client
+(@file{examples/wayland.scm}).
+
+@c ====================================================================
+@node GPU Tensors
+@chapter GPU Tensors
+
+@cindex tensors
+@cindex @code{(vulkan compute)}
+@code{(vulkan compute)} provides tensors: 1-D and 2-D arrays of 32-bit
+floats in GPU memory, with the operations a small neural network needs.
+
+@lisp
+(use-modules (vulkan compute))
+
+(define x (list->tensor '(1 2 3 4 5 6) '(2 3)))
+(define w (list->tensor '(1 0 0 1 1 1) '(3 2)))
+(tensor->list (tensor-relu (tensor-matmul x w)))   ; @result{} (4.0 5.0 10.0 11.0)
+@end lisp
+
+@menu
+* Contexts::                Devices and queues.
+* Tensors::                 Making tensors and reading them back.
+* Operations::              What can be computed.
+* Execution and Memory::    When work runs and memory is freed.
+@end menu
+
+@node Contexts
+@section Contexts
+
+A @dfn{compute context} is a Vulkan device and queue with the objects
+tensors need.  One is created on first use, so most programs never deal
+with contexts.
+
+@deffn {Scheme Procedure} make-compute-context [#:device n] [#:max-allocations n]
+Create a context on Vulkan device number @var{device}, or by default on
+the most capable device with a compute queue: a discrete GPU, then an
+integrated one, then a software renderer.  @var{max-allocations} lowers
+the device's limit on live memory allocations, for testing.
+@end deffn
+
+@deffn {Scheme Procedure} default-compute-context
+The context used when none is given: the value of
+@code{current-compute-context} if set, else one made on first use with
+@code{make-compute-context}'s defaults.
+@end deffn
+
+@defvr {Scheme Parameter} current-compute-context
+When set to a context, new tensors are made on it.
+@end defvr
+
+@deffn {Scheme Procedure} compute-context? obj
+@deffnx {Scheme Procedure} compute-context-device-name context
+@deffnx {Scheme Procedure} compute-context-allocation-count context
+A predicate; the device's name; the number of live memory allocations.
+@end deffn
+
+@deffn {Scheme Procedure} compute-flush! [context]
+Submit everything recorded on @var{context} and wait for it
+(@pxref{Execution and Memory}).
+@end deffn
+
+@deffn {Scheme Procedure} compute-context-destroy! [context]
+Wait for @var{context}'s work and destroy it, freeing all its memory.
+Its tensors may not be used afterwards.
+@end deffn
+
+@node Tensors
+@section Tensors
+
+A tensor's shape is @code{(@var{n})} or @code{(@var{rows} @var{cols})},
+stored row by row.
+
+@deffn {Scheme Procedure} make-tensor shape [#:context c] [#:fill x]
+A tensor of @var{shape} with every element @var{x} (default 0).
+@end deffn
+
+@deffn {Scheme Procedure} f32vector->tensor v [shape] [#:context c]
+@deffnx {Scheme Procedure} list->tensor numbers [shape] [#:context c]
+A tensor holding the 32-bit floats of @var{v} (an f32vector or any
+bytevector), or the @var{numbers}, with @var{shape}, by default
+@code{(@var{length})}.
+@end deffn
+
+@deffn {Scheme Procedure} tensor->f32vector tensor
+@deffnx {Scheme Procedure} tensor->list tensor
+The elements of @var{tensor}, read back from the GPU after running the
+work it depends on.
+@end deffn
+
+@deffn {Scheme Procedure} tensor-reshape tensor shape
+A tensor with @var{shape} sharing @var{tensor}'s elements.
+@end deffn
+
+@deffn {Scheme Procedure} tensor? obj
+@deffnx {Scheme Procedure} tensor-shape tensor
+@deffnx {Scheme Procedure} tensor-size tensor
+@deffnx {Scheme Procedure} tensor-context tensor
+A predicate, the shape, the number of elements, the context.
+@end deffn
+
+@deffn {Scheme Procedure} tensor-free! tensor
+Release @var{tensor}'s GPU memory once pending work is done, without
+waiting for the garbage collector.
+@end deffn
+
+@cindex interoperability
+Since SRFI-4 f32vectors are bytevectors in Guile, data moves between
+tensors and other array libraries (SRFI-4, newra, Guile-CV) without
+conversion.
+
+@node Operations
+@section Operations
+
+Operations make new tensors on the context of their first argument.
+
+@deffn {Scheme Procedure} tensor-matmul a b [#:transpose-a? t] [#:transpose-b? t] [#:alpha x]
+@var{alpha} times op(@var{a}) times op(@var{b}), where op transposes its
+argument when asked.  op(@var{a}) is an @var{m}-by-@var{k} matrix and
+op(@var{b}) a @var{k}-by-@var{n} one; the result is @var{m}-by-@var{n}.  The transposes give the products
+backpropagation needs, such as @math{A^T B}, without copying.
+@end deffn
+
+@deffn {Scheme Procedure} tensor-add a b
+@deffnx {Scheme Procedure} tensor-sub a b
+@deffnx {Scheme Procedure} tensor-mul a b
+@deffnx {Scheme Procedure} tensor-div a b
+Elementwise arithmetic.  @var{b} has @var{a}'s size, or is a 1-D tensor
+of @var{a}'s column count, applied to every row (for example a bias).
+@end deffn
+
+@deffn {Scheme Procedure} tensor-relu a
+@deffnx {Scheme Procedure} tensor-relu-backward x gradient
+@code{max(0, @var{a})}; and @var{gradient} where @var{x} is positive,
+else 0: the gradient through a ReLU at @var{x}.
+@end deffn
+
+@deffn {Scheme Procedure} tensor-scale a s
+@deffnx {Scheme Procedure} tensor-add-scalar a s
+@var{a} times, or plus, the number @var{s}.
+@end deffn
+
+@deffn {Scheme Procedure} tensor-exp a
+@deffnx {Scheme Procedure} tensor-tanh a
+@deffnx {Scheme Procedure} tensor-sigmoid a
+@deffnx {Scheme Procedure} tensor-copy a
+Elementwise functions.
+@end deffn
+
+@deffn {Scheme Procedure} tensor-softmax-rows a
+The softmax of each row of @var{a}.
+@end deffn
+
+@deffn {Scheme Procedure} tensor-sum-rows a
+The sum of @var{a}'s rows: a 1-D tensor of its column sums (for example
+a bias gradient).
+@end deffn
+
+@node Execution and Memory
+@section Execution and Memory
+
+@cindex batching
+Operations are recorded into a command buffer rather than run one by
+one.  Reading a tensor back, or calling @code{compute-flush!}, submits
+everything recorded and waits for it.  A chain of operations therefore
+costs one round trip to the GPU.
+
+@cindex memory
+@cindex garbage collection
+Tensors are freed by the garbage collector, or with
+@code{tensor-free!}, once the GPU is done with them.  Their buffers are
+kept and reused for new tensors of the same size, up to 256@tie{}MiB, so
+a training loop does not allocate GPU memory every step.
+
+Guile's collector does not see GPU memory, so the module forces a
+collection to free unreferenced tensors in three cases: after every
+256@tie{}MiB of new tensors; when the number of live allocations nears
+the device's limit (which can be as low as 4096); and when an allocation
+fails for lack of memory or of allocations, after which it retries once.
+For large tensors, @code{tensor-free!} releases memory sooner.
+
+The shaders are in @file{shaders/*.comp}.  @code{guile shaders/build.scm}
+compiles them (with glslangValidator) and embeds the SPIR-V in
+@code{(vulkan compute shaders)}, so the module needs no files besides
+Scheme modules.
+
+@c ====================================================================
+@node Examples
+@chapter Examples
+
+@cindex examples
+The programs in @file{examples/} each have a @file{README.md}.  Run them
+from the repository root:
+
+@table @file
+@item examples/compute/compute.scm
+A headless compute shader that squares 1000 floats, using the raw API.
+
+@item examples/gears/gears.scm
+The classic spinning gears in an X11 window, with dynamic rendering.
+
+@item examples/cube/cube.scm
+A spinning, lit, textured cube in a native Wayland window, using only
+libwayland-client.
+
+@item examples/spirals/spirals.scm
+A small neural network trained on the GPU with @code{(vulkan compute)}
+to tell three interleaved spirals apart.
+@end table
+
+For example:
+
+@example
+guile -L . examples/spirals/spirals.scm
+@end example
+
+The tests are in @file{tests/}: @file{tests/compute.scm} checks every
+@code{(vulkan compute)} operation against plain Guile, and
+@file{tests/xcb-surface.scm} and @file{tests/wayland-presentation.scm}
+check the window-system modules, and
+@file{tests/compare-with-chez-vulkan.scm} checks that the bindings
+match chez-vulkan's.  The continuous integration runs all of them, and
+the examples, on Mesa's software Vulkan driver.
+
+@c ====================================================================
+@node Regenerating
+@chapter Regenerating the Bindings
+
+@cindex CastXML
+@cindex generator
+@file{vulkan.scm} and @file{vulkan/@{xlib,xcb,wayland@}.scm} are
+generated by @file{generate.scm} from a
+@uref{https://github.com/CastXML/CastXML, CastXML} parse of the Vulkan
+headers, which needs the X11, Xrandr, XCB and Wayland development headers:
+
+@example
+castxml --castxml-gccxml -DVK_USE_PLATFORM_XLIB_KHR \
+  -DVK_USE_PLATFORM_XLIB_XRANDR_EXT -DVK_USE_PLATFORM_XCB_KHR \
+  -DVK_USE_PLATFORM_WAYLAND_KHR -o res/vulkan.xml /usr/include/vulkan/vulkan.h
+guile generate.scm
+@end example
+
+@file{vulkan/win32.scm} comes from a second parse for 64-bit Windows,
+which needs the Windows SDK and MSVC headers (for example from
+msvc-wine).  The generator checks that the core module from that parse
+is identical to @file{vulkan.scm}:
+
+@example
+WINSDK_INCLUDE=@dots{} MSVC_INCLUDE=@dots{} res/make-win32-xml.sh
+guile generate.scm res/vulkan-win32.xml
+@end example
+
+Which functions get plain names is decided from the header section each
+one is declared in, not from the installed loader, so regenerating
+anywhere gives the same bindings.
+
+@c ====================================================================
+@node Procedure Index
+@unnumbered Procedure Index
+@printindex fn
+
+@node Concept Index
+@unnumbered Concept Index
+@printindex cp
+
+@bye

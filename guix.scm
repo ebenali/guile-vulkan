@@ -8,6 +8,7 @@
 ;;;
 ;;; The bindings find the Vulkan loader by its store path; Vulkan drivers are
 ;;; found as usual (e.g. Mesa's, through VK_DRIVER_FILES or XDG_DATA_DIRS).
+;;; The manual is installed as Info: `info guile-vulkan'.
 
 (use-modules (guix packages)
              (guix gexp)
@@ -15,6 +16,7 @@
              (guix build-system guile)
              ((guix licenses) #:prefix license:)
              (gnu packages guile)
+             (gnu packages texinfo)
              (gnu packages vulkan))
 
 (define %source-directory (dirname (current-filename)))
@@ -40,8 +42,13 @@
           (lambda* (#:key inputs #:allow-other-keys)
             (substitute* "vulkan/runtime.scm"
               (("\"libvulkan\\.so\\.1\"")
-               (string-append "\"" (search-input-file inputs "lib/libvulkan.so.1") "\""))))))))
-  (native-inputs (list guile-3.0))
+               (string-append "\"" (search-input-file inputs "lib/libvulkan.so.1") "\"")))))
+        (add-after 'build 'install-manual       ; guile-build-system's build also installs
+          (lambda _
+            (let ((info (string-append #$output "/share/info")))
+              (mkdir-p info)
+              (invoke "makeinfo" "-o" info "doc/guile-vulkan.texi")))))))
+  (native-inputs (list guile-3.0 texinfo))
   (inputs (list guile-3.0 vulkan-loader))
   (synopsis "Vulkan bindings for GNU Guile")
   (description
