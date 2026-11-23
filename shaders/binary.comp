@@ -1,0 +1,31 @@
+#version 450
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// out[i] = a[i] OP b[j], where j = i, or i % b_cols when b_cols > 0 (b is a
+// row broadcast over the rows of a, e.g. a bias).
+// op: 0 add, 1 sub, 2 mul, 3 div, 4 relu-backward (out = a > 0 ? b : 0).
+
+layout(local_size_x = 256) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer A { float a[]; };
+layout(std430, set = 0, binding = 1) readonly buffer B { float b[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer Out { float o[]; };
+
+layout(push_constant) uniform Push { uint n; uint op; uint b_cols; } p;
+
+void main() {
+    // Grid-stride loop: any n, whatever the number of workgroups.
+    uint stride = gl_NumWorkGroups.x * 256;
+    for (uint i = gl_GlobalInvocationID.x; i < p.n; i += stride) {
+    float x = a[i];
+    float y = b[p.b_cols > 0 ? i % p.b_cols : i];
+    float r;
+    switch (p.op) {
+        case 0: r = x + y; break;
+        case 1: r = x - y; break;
+        case 2: r = x * y; break;
+        case 3: r = x / y; break;
+        default: r = x > 0.0 ? y : 0.0; break;
+    }
+    o[i] = r;
+    }
+}

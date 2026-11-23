@@ -1,0 +1,42 @@
+#version 450
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// C = alpha * op(A) * op(B), with op(A) M x K and op(B) K x N, all row-major.
+// trans_a: A is stored K x M (so op(A) = A^T); trans_b: B is stored N x K.
+// 16 x 16 tiles staged in shared memory.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer A { float a[]; };
+layout(std430, set = 0, binding = 1) readonly buffer B { float b[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer C { float c[]; };
+
+layout(push_constant) uniform Push {
+    uint m; uint n; uint k; uint trans_a; uint trans_b; float alpha;
+} p;
+
+shared float tile_a[16][16];
+shared float tile_b[16][16];
+
+void main() {
+    uint row = gl_GlobalInvocationID.y;
+    uint col = gl_GlobalInvocationID.x;
+    uint ty = gl_LocalInvocationID.y;
+    uint tx = gl_LocalInvocationID.x;
+    float acc = 0.0;
+    for (uint t = 0; t < p.k; t += 16) {
+        uint ak = t + tx;
+        tile_a[ty][tx] = (row < p.m && ak < p.k)
+            ? (p.trans_a != 0 ? a[ak * p.m + row] : a[row * p.k + ak]) : 0.0;
+        uint bk = t + ty;
+        tile_b[ty][tx] = (bk < p.k && col < p.n)
+            ? (p.trans_b != 0 ? b[col * p.k + bk] : b[bk * p.n + col]) : 0.0;
+        barrier();
+        for (uint i = 0; i < 16; i++) {
+            acc += tile_a[ty][i] * tile_b[i][tx];
+        }
+        barrier();
+    }
+    if (row < p.m && col < p.n) {
+        c[row * p.n + col] = p.alpha * acc;
+    }
+}

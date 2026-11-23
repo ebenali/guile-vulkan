@@ -1,0 +1,51 @@
+#version 450
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Row-wise softmax of a rows x cols matrix; each workgroup takes rows
+// gl_WorkGroupID.x, + gl_NumWorkGroups.x, ...
+// Subtracts the row maximum first, for numerical stability.
+
+layout(local_size_x = 256) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer In { float x[]; };
+layout(std430, set = 0, binding = 1) buffer Out { float y[]; };
+
+layout(push_constant) uniform Push { uint rows; uint cols; } p;
+
+shared float partial[256];
+
+void main() {
+  uint t = gl_LocalInvocationID.x;
+  // The loop condition is the same for the whole workgroup, so the barriers
+  // inside stay in uniform control flow.
+  for (uint row = gl_WorkGroupID.x; row < p.rows; row += gl_NumWorkGroups.x) {
+    uint base = row * p.cols;
+
+    float m = -3.402823466e38;
+    for (uint c = t; c < p.cols; c += 256) m = max(m, x[base + c]);
+    partial[t] = m;
+    barrier();
+    for (uint s = 128; s > 0; s >>= 1) {
+        if (t < s) partial[t] = max(partial[t], partial[t + s]);
+        barrier();
+    }
+    float row_max = partial[0];
+    barrier();
+
+    float sum = 0.0;
+    for (uint c = t; c < p.cols; c += 256) {
+        float e = exp(x[base + c] - row_max);
+        y[base + c] = e;
+        sum += e;
+    }
+    partial[t] = sum;
+    barrier();
+    for (uint s = 128; s > 0; s >>= 1) {
+        if (t < s) partial[t] += partial[t + s];
+        barrier();
+    }
+    float total = partial[0];
+
+    for (uint c = t; c < p.cols; c += 256) y[base + c] /= total;
+    barrier();                            // partial[] is reused for the next row
+  }
+}

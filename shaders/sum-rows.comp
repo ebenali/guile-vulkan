@@ -1,0 +1,20 @@
+#version 450
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Column sums of a rows x cols matrix: out[c] = sum over r of a[r][c]
+// (e.g. a bias gradient).  One invocation per column.
+
+layout(local_size_x = 256) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer A { float a[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer Out { float o[]; };
+
+layout(push_constant) uniform Push { uint rows; uint cols; } p;
+
+void main() {
+    uint stride = gl_NumWorkGroups.x * 256;
+    for (uint c = gl_GlobalInvocationID.x; c < p.cols; c += stride) {
+        float sum = 0.0;
+        for (uint r = 0; r < p.rows; r++) sum += a[r * p.cols + c];
+        o[c] = sum;
+    }
+}

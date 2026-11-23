@@ -16,6 +16,8 @@ the two easily.
   (`vk:api-version-1-3`, `vk:whole-size`, `vk:make-api-version`, …).
 - `(vulkan xlib)`, `(vulkan xcb)`, `(vulkan wayland)`, `(vulkan win32)`: the
   window-system surfaces.
+- `(vulkan compute)`: GPU tensors for numerical work, built on the above
+  (see below).
 
 The library loads the Vulkan loader under its platform's name:
 `libvulkan.so.1` on Linux, `vulkan-1.dll` on Windows, `libvulkan.1.dylib`
@@ -85,12 +87,61 @@ Device-level functions (first parameter a `VkDevice`, `VkQueue` or
 `VkCommandBuffer`) take a device; the rest take an instance, or `#f` for
 global functions.
 
+## GPU tensors: `(vulkan compute)`
+
+1-D and 2-D arrays of 32-bit floats in GPU memory, with the operations a
+small neural network needs:
+
+```scheme
+(use-modules (vulkan compute))
+
+(define x (list->tensor '(1 2 3 4 5 6) '(2 3)))
+(define w (list->tensor '(1 0 0 1 1 1) '(3 2)))
+(tensor->list (tensor-relu (tensor-matmul x w)))   ; => (4.0 5.0 10.0 11.0)
+```
+
+- Tensors: `make-tensor`, `list->tensor`, `f32vector->tensor`,
+  `tensor->f32vector`, `tensor->list`, `tensor-reshape` (a view),
+  `tensor-shape`.
+- Matrix multiply: `(tensor-matmul a b #:transpose-a? #:transpose-b? #:alpha)`.
+- Elementwise: `tensor-add`, `tensor-sub`, `tensor-mul`, `tensor-div` (the
+  second operand may be a row added to every row, e.g. a bias),
+  `tensor-relu-backward`, `tensor-relu`, `tensor-scale`, `tensor-add-scalar`,
+  `tensor-exp`, `tensor-tanh`, `tensor-sigmoid`, `tensor-copy`.
+- Reductions: `tensor-softmax-rows`, `tensor-sum-rows` (column sums).
+
+Operations are queued on the GPU rather than run one by one. Reading a
+result (`tensor->f32vector`, `tensor->list`) or calling `compute-flush!`
+submits everything queued and waits. Tensors are freed by the garbage
+collector, once the GPU is done with them, or with `tensor-free!`.
+
+A context (device and queue) is created on first use, on the most capable
+device: a discrete GPU first, then integrated, then a software renderer.
+`(make-compute-context #:device n)` together with `current-compute-context`
+choose another. Since f32vectors are bytevectors, data moves to and from
+other array libraries (SRFI-4, newra, Guile-CV) without conversion.
+
+A 2048×2048 matrix multiply reaches about 1–2 TFLOP/s on current mid-range
+GPUs, and about 35 GFLOP/s on Mesa's software renderer. Plain Guile manages
+about 0.3 GFLOP/s.
+
+The shaders are in `shaders/*.comp`. `guile shaders/build.scm` compiles them
+(it needs glslangValidator) and embeds the SPIR-V in
+`vulkan/compute/shaders.scm`.
+
 ## Examples
 
 Run from the repository root:
 
 - `guile -L . examples/compute/compute.scm [device-index]`: squares 1000
   floats with a compute shader and checks the result.
+
+Tests, also run from the repository root: `guile -L . tests/compute.scm
+[device-index]` checks every `(vulkan compute)` operation against plain
+Guile. `tests/xcb-surface.scm` (for example under `xvfb-run`) and
+`tests/wayland-presentation.scm` check the window-system modules.
+
+A Guix package for this checkout: `guix build -f guix.scm`.
 
 The first run compiles `(vulkan)`, which takes about 20 seconds; Guile caches
 the result.
