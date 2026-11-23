@@ -608,6 +608,8 @@ collection to free unreferenced tensors in three cases: after every
 256@tie{}MiB of new tensors; when the number of live allocations nears
 the device's limit (which can be as low as 4096); and when an allocation
 fails for lack of memory or of allocations, after which it retries once.
+The collected tensors' buffers go to the pool, except in the last two
+cases, where memory or allocations are short and the pool is emptied.
 For large tensors, @code{tensor-free!} releases memory sooner.
 
 The shaders are in @file{shaders/*.comp}.  @code{guile shaders/build.scm}

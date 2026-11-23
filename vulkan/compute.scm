@@ -19,7 +19,7 @@
 ;;; forced to free the unreferenced ones after every gc-threshold-bytes of
 ;;; tensors, when the live allocations near the device's limit (as low as
 ;;; 4096 on some drivers), and when an allocation fails for lack of memory
-;;; or of allocations.
+;;; or of allocations; in those last two cases the pool is emptied too.
 ;;;
 ;;; The context (device, queue, ...) is created on first use, on the most
 ;;; capable device; make-compute-context and current-compute-context choose
@@ -269,6 +269,9 @@ else one made on first use with make-compute-context's default device."
               (iota (vk-ref vk:physical-device-memory-properties (memory-type-count) props)))
         (error "no suitable Vulkan memory type"))))
 
+;; Successful vkAllocateMemory calls, for the tests.
+(define buffer-allocations 0)
+
 ;; => (values buffer memory)
 (define (make-buffer ctx size usage properties)
   (let* ((device (context-device ctx))
@@ -296,6 +299,7 @@ else one made on first use with make-compute-context's default device."
       (cond
        ((= r vk:success)
         (let ((memory (bytevector-u64-native-ref slot 0)))
+          (set! buffer-allocations (+ buffer-allocations 1))
           (set-context-allocation-count! ctx (+ 1 (compute-context-allocation-count ctx)))
           (hashv-set! (context-buffers ctx) buffer memory)
           (check 'vkBindBufferMemory (vk:bind-buffer-memory device buffer memory 0))
@@ -315,9 +319,17 @@ else one made on first use with make-compute-context's default device."
 
 ;; A host-visible buffer of SIZE bytes => (values buffer memory mapped-bytevector).
 (define (make-staging-buffer ctx size usage)
+  (define (allocate)
+    (make-buffer ctx size usage (logior vk:memory-property-host-visible-bit
+                                        vk:memory-property-host-coherent-bit)))
   (call-with-values
-      (lambda () (make-buffer ctx size usage (logior vk:memory-property-host-visible-bit
-                                                     vk:memory-property-host-coherent-bit)))
+      (lambda ()
+        (call-with-values allocate
+          (lambda (buffer memory)
+            (if buffer
+                (values buffer memory)
+                (begin (collect-garbage! ctx #:drain? #t)   ; out of memory: free garbage, retry once
+                       (allocate))))))
     (lambda (buffer memory)
       (unless buffer (error "out of host-visible Vulkan memory for" size 'bytes))
       (let ((address (create 'vkMapMemory
@@ -623,15 +635,19 @@ waited for the GPU to finish (staging buffers, collected tensors)."
   (hash-clear! (context-pool ctx))
   (set-context-pool-bytes! ctx 0))
 
-;; The collector cannot see GPU memory: after this many bytes of tensors,
-;; a collection is forced (and its garbage freed by a flush).
+;; The collector cannot see GPU memory: after this many bytes of new
+;; tensor memory, a collection is forced (and its garbage released by a
+;; flush).
 (define gc-threshold-bytes (* 256 1024 1024))
 
-(define (collect-garbage! ctx)
+;; Collect and release unreferenced tensors.  Their buffers go to the pool
+;; for reuse; with DRAIN?, when memory or allocations are short, the pool
+;; is then emptied so the memory is really freed.
+(define* (collect-garbage! ctx #:key drain?)
   (set-context-bytes-allocated! ctx 0)
   (gc)
-  (compute-flush! ctx)                  ; releases the tensors the collector found
-  (drain-pool! ctx))                    ; and really frees their memory
+  (compute-flush! ctx)
+  (when drain? (drain-pool! ctx)))
 
 ;; An uninitialized tensor of SHAPE on CTX.
 (define (allocate-tensor ctx shape)
@@ -644,23 +660,30 @@ waited for the GPU to finish (staging buffers, collected tensors)."
                                           vk:buffer-usage-transfer-src-bit
                                           vk:buffer-usage-transfer-dst-bit)
                                   vk:memory-property-device-local-bit))))
-    (unless (pair? (hashv-ref (context-pool ctx) bytes '()))   ; reuse counts as nothing new
-      (set-context-bytes-allocated! ctx (+ bytes (context-bytes-allocated ctx))))
-    (when (or (> (context-bytes-allocated ctx) gc-threshold-bytes)
-              ;; Leave a quarter of the allocations for staging buffers and slack.
-              (>= (* 4 (compute-context-allocation-count ctx)) (* 3 (context-max-allocations ctx))))
-      (collect-garbage! ctx))
+    (define (new-allocation)
+      (set-context-bytes-allocated! ctx (+ bytes (context-bytes-allocated ctx)))
+      (call-with-values allocate
+        (lambda (buffer memory)
+          (if buffer
+              (values buffer memory)
+              (begin (collect-garbage! ctx #:drain? #t)   ; out of memory: free garbage, retry once
+                     (allocate))))))
     (call-with-values
         (lambda ()
           (match (pool-take! ctx bytes)
-            ((buffer . memory) (values buffer memory))  ; reused: no new allocation
+            ((buffer . memory) (values buffer memory))    ; reused: nothing new allocated
             (#f
-             (call-with-values allocate
-               (lambda (buffer memory)
-                 (if buffer
-                     (values buffer memory)
-                     (begin (collect-garbage! ctx)      ; out of memory: free garbage, retry once
-                            (allocate))))))))
+             (cond
+              ;; Near the device's allocation limit (leaving a quarter for
+              ;; staging buffers and slack): free all the garbage.
+              ((>= (* 4 (compute-context-allocation-count ctx)) (* 3 (context-max-allocations ctx)))
+               (collect-garbage! ctx #:drain? #t))
+              ((> (+ bytes (context-bytes-allocated ctx)) gc-threshold-bytes)
+               (collect-garbage! ctx)))
+             ;; The collection may have released a buffer of this size.
+             (match (pool-take! ctx bytes)
+               ((buffer . memory) (values buffer memory))
+               (#f (new-allocation))))))
       (lambda (buffer memory)
         (unless buffer
           (error "out of GPU memory for a tensor of" shape))

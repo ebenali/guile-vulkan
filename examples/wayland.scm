@@ -67,6 +67,12 @@
 (define marshal-flag-destroy 1)
 (define keep (make-hash-table))           ; objects C refers to, kept alive
 
+;; Calling this keeps its arguments alive up to the call.  It is assigned
+;; again so the compiler cannot inline it and drop the call (a plain
+;; `(list ...)' with an unused result is removed).
+(define keep-alive (lambda args #f))
+(set! keep-alive (lambda args #f))
+
 (define (request proxy opcode interface flags . args)
   (let ((bv (make-bytevector (* 8 (max 1 (length args))) 0))
         (strings '()))
@@ -81,7 +87,7 @@
                        (else arg))))
               args (iota (length args)))
     (let ((r (%marshal proxy opcode (or interface 0) (wl-proxy-get-version proxy) flags (vk-address bv))))
-      (list strings bv)                   ; keep them alive until here
+      (keep-alive strings bv)             ; keep them alive until here
       r)))
 
 ;;; ------------------------------------------------------------------
@@ -129,20 +135,26 @@
 (define xdg-wm-base-interface (make-interface))
 (define xdg-surface-interface (make-interface))
 (define xdg-toplevel-interface (make-interface))
+;; Never used here, but named so the requests that create them are typed.
+(define xdg-positioner-interface (make-interface))
+(define xdg-popup-interface (make-interface))
 
 (fill-interface! xdg-wm-base-interface "xdg_wm_base" 1
                  `(("destroy" "" #f)
-                   ("create_positioner" "n" #f)
+                   ("create_positioner" "n" ,(types-array xdg-positioner-interface))
                    ("get_xdg_surface" "no" ,(types-array xdg-surface-interface wl-surface-interface))
                    ("pong" "u" #f))
                  '(("ping" "u" #f)))
 (fill-interface! xdg-surface-interface "xdg_surface" 1
                  `(("destroy" "" #f)
                    ("get_toplevel" "n" ,(types-array xdg-toplevel-interface))
-                   ("get_popup" "n?oo" ,(types-array #f xdg-surface-interface #f))
+                   ("get_popup" "n?oo" ,(types-array xdg-popup-interface xdg-surface-interface
+                                                     xdg-positioner-interface))
                    ("set_window_geometry" "iiii" #f)
                    ("ack_configure" "u" #f))
                  '(("configure" "u" #f)))
+(fill-interface! xdg-positioner-interface "xdg_positioner" 1 '() '())
+(fill-interface! xdg-popup-interface "xdg_popup" 1 '() '())
 (fill-interface! xdg-toplevel-interface "xdg_toplevel" 1
                  `(("destroy" "" #f)
                    ("set_parent" "?o" ,(types-array xdg-toplevel-interface))
@@ -269,7 +281,7 @@ compositor has configured it."
     (bytevector-u64-native-set! args 8 (vk-address c-name))
     (bytevector-u64-native-set! args 16 version)
     (let ((r (%marshal registry 0 interface version 0 (vk-address args))))
-      (list c-name args)                  ; keep them alive until here
+      (keep-alive c-name args)            ; keep them alive until here
       r)))
 
 (define (listen-keyboard! w keyboard)
@@ -293,16 +305,22 @@ compositor has configured it."
 Returns #f once the compositor asked to close the window."
   (when on-resize (set-window-on-resize! w on-resize))
   (let ((display (wayland-window-display w)))
+    ;; libwayland returns -1 once the connection has failed (a protocol
+    ;; error or a lost compositor); the window is then closed.
+    (define (lost) (format (current-error-port) "Wayland connection lost~%") (set-window-closed?! w #t) #f)
     (let loop ()
-      (unless (zero? (wl-display-prepare-read display))
-        (wl-display-dispatch-pending display)
-        (loop)))
-    (wl-display-flush display)
-    (match (select (list (wl-display-get-fd display)) '() '() 0)
-      (((_ . _) _ _) (wl-display-read-events display))
-      (_ (wl-display-cancel-read display)))
-    (wl-display-dispatch-pending display)
-    (not (wayland-window-closed? w))))
+      (cond ((zero? (wl-display-prepare-read display))
+             (wl-display-flush display)
+             (if (< (match (select (list (wl-display-get-fd display)) '() '() 0)
+                      (((_ . _) _ _) (wl-display-read-events display))
+                      (_ (wl-display-cancel-read display) 0))
+                    0)
+                 (lost)
+                 (if (< (wl-display-dispatch-pending display) 0)
+                     (lost)
+                     (not (wayland-window-closed? w)))))
+            ((< (wl-display-dispatch-pending display) 0) (lost))
+            (else (loop))))))
 
 (define (wayland-close-window w)
   (let ((destroy (lambda (proxy) (request proxy 0 #f marshal-flag-destroy))))

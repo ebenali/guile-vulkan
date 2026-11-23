@@ -149,6 +149,46 @@
     (format #t "FAIL   live allocations peaked at ~a~%" peak))
   (compute-context-destroy! limited))
 
+;; The buffer pool, on a context of its own so the counts are exact.
+(define (expect name got expected)
+  (if (equal? got expected)
+      (format #t "ok   ~a~%" name)
+      (begin (set! failures (+ failures 1))
+             (format #t "FAIL ~a: ~a, expected ~a~%" name got expected))))
+(let* ((ctx (make-compute-context #:device (and (pair? (cdr (command-line)))
+                                                (string->number (cadr (command-line))))))
+       (count (lambda () (compute-context-allocation-count ctx)))
+       (big (lambda () (make-tensor (list (* 1024 1024)) #:context ctx))))   ; 4 MiB
+  ;; Freed buffers are reused: 500 make/free rounds allocate once.
+  (for-each (lambda (i) (tensor-free! (make-tensor '(1000) #:context ctx)) (compute-flush! ctx))
+            (iota 500))
+  (expect "freed buffers are reused" (count) 1)
+  ;; The pool keeps at most 256 MiB: with the small buffer above, 63 of 80
+  ;; freed 4 MiB buffers fit.
+  (let ((tensors (map (lambda (i) (big)) (iota 80))))
+    (compute-flush! ctx)
+    (for-each tensor-free! tensors)
+    (compute-flush! ctx))
+  (expect "the pool keeps at most 256 MiB" (count) 64)
+  ;; ...and new tensors of that size take them before allocating.
+  (let ((tensors (map (lambda (i) (big)) (iota 64))))   ; 63 pooled, 1 new
+    (expect "pooled buffers are taken first" (count) 65)
+    (test "a pooled buffer holds new data"
+          (tensor->list (tensor-add-scalar (car tensors) 2.0)) (make-list (* 1024 1024) 2.0)))
+  ;; 800 unreferenced 4 MiB temporaries, reclaimed by the collections
+  ;; forced every 256 MiB of new memory: those collections must put their
+  ;; buffers in the pool for reuse, not free them, so about half the
+  ;; temporaries are new allocations (all of them if the pool were emptied).
+  (let ((allocations (lambda () (@@ (vulkan compute) buffer-allocations))))
+    (let ((before (allocations)))
+      (for-each (lambda (i) (tensor-add-scalar (big) 1.0)) (iota 400))
+      (compute-flush! ctx)
+      (let ((made (- (allocations) before)))
+        (expect (format #f "forced collections refill the pool (~a allocations for 800 tensors)" made)
+                (< made 600) #t))))
+  (compute-context-destroy! ctx)
+  (expect "destroying the context frees pooled buffers" (count) 0))
+
 ;; More elements than 65535 workgroups of 256: the grid-stride loops.
 (let* ((n 20000000)
        (v (tensor->f32vector (tensor-add-scalar (make-tensor (list n) #:fill 2.0) 1.0))))

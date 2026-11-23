@@ -20,15 +20,23 @@
 ;;; ------------------------------------------------------------------
 ;;; Options.
 
+;; The value after NAME, converted by CONVERT, which returns #f if it is
+;; not valid; DEFAULT if NAME is absent.
 (define (option name convert default)
   (let loop ((args (cdr (command-line))))
     (match args
       (() default)
-      (((? (lambda (a) (string=? a name))) value . _) (convert value))
+      (((? (lambda (a) (string=? a name))) value . _)
+       (or (convert value) (error (string-append "invalid value for " name ":") value)))
+      (((? (lambda (a) (string=? a name)))) (error "missing value for" name))
       ((_ . rest) (loop rest)))))
 
-(define device (option "--device" string->number #f))
-(define steps (option "--steps" string->number 3000))
+(define (count-option s)
+  (let ((n (string->number s)))
+    (and (exact-integer? n) (>= n 0) n)))
+
+(define device (option "--device" count-option #f))
+(define steps (option "--steps" count-option 3000))
 (define output (option "--output" identity "spirals.ppm"))
 
 (current-compute-context (make-compute-context #:device device))
@@ -132,7 +140,9 @@
     (loop (+ i 1))))
 (compute-flush!)
 (define elapsed (- (now) start))
-(format #t "~a steps in ~,2f s (~a steps/s)~%" steps elapsed (inexact->exact (round (/ steps elapsed))))
+(when (positive? steps)
+  (format #t "~a steps in ~,2f s (~a steps/s)~%"
+          steps elapsed (inexact->exact (round (/ steps (max elapsed 1e-6))))))
 
 ;;; ------------------------------------------------------------------
 ;;; The picture: the predicted class over a grid, then the training points.

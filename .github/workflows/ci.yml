@@ -63,9 +63,20 @@ jobs:
       - name: The API matches chez-vulkan's
         run: guile tests/compare-with-chez-vulkan.scm chez-vulkan/vulkan.ss
 
+      # Compiling the bindings takes Ubuntu's Guile about 15 minutes, so the
+      # compiled modules are cached by the sources' contents.
+      - name: Cache the compiled modules
+        id: compiled
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .go
+          key: guile-go-ubuntu-24.04-${{ hashFiles('vulkan.scm', 'vulkan/**/*.scm', 'examples/*.scm') }}
+
+      - run: echo "GUILE_LOAD_COMPILED_PATH=$PWD/.go" >> "$GITHUB_ENV"
+
       - name: Compile the modules
+        if: steps.compiled.outputs.cache-hit != 'true'
         run: |
-          echo "GUILE_LOAD_COMPILED_PATH=$PWD/.go" >> "$GITHUB_ENV"
           for f in vulkan/runtime.scm vulkan/constants.scm vulkan.scm vulkan/xlib.scm vulkan/xcb.scm \
                    vulkan/wayland.scm vulkan/win32.scm vulkan/compute/shaders.scm vulkan/compute.scm \
                    examples/common.scm examples/math.scm examples/x11.scm examples/wayland.scm; do
@@ -75,13 +86,13 @@ jobs:
       - name: (vulkan compute) tests (lavapipe, validation layer)
         run: |
           VK_INSTANCE_LAYERS=$VALIDATE guile -L . tests/compute.scm 2>&1 | tee compute-test.txt
-          ! grep -q 'Validation Error' compute-test.txt
+          if grep -q 'Validation Error' compute-test.txt; then exit 1; fi
 
       - name: Compute example (lavapipe, validation layer)
         run: |
           VK_INSTANCE_LAYERS=$VALIDATE guile -L . examples/compute/compute.scm 2>&1 | tee compute.txt
           grep -q '1000/1000 elements correct' compute.txt
-          ! grep -q 'Validation Error' compute.txt
+          if grep -q 'Validation Error' compute.txt; then exit 1; fi
 
       - name: Spirals example (lavapipe, validation layer)
         run: |
@@ -90,13 +101,13 @@ jobs:
           # Training must have learned: at least 95% accuracy after 300 steps.
           grep -E '^step +300 ' spirals.txt | grep -qE 'accuracy (9[5-9]|100)\.'
           head -c 2 spirals.ppm | grep -q P6
-          ! grep -q 'Validation Error' spirals.txt
+          if grep -q 'Validation Error' spirals.txt; then exit 1; fi
 
       - name: Gears example (Xvfb, lavapipe, validation layer)
         run: |
           VK_INSTANCE_LAYERS=$VALIDATE \
             xvfb-run -a guile -L . examples/gears/gears.scm --frames 60 2>&1 | tee gears.txt
-          ! grep -q 'Validation Error' gears.txt
+          if grep -q 'Validation Error' gears.txt; then exit 1; fi
 
       - name: XCB surface test (Xvfb, lavapipe)
         run: xvfb-run -a guile -L . tests/xcb-surface.scm
@@ -107,12 +118,13 @@ jobs:
           mkdir -m 700 -p "$XDG_RUNTIME_DIR"
           weston --backend=headless --socket=wayland-ci --idle-time=0 > weston.log 2>&1 &
           weston_pid=$!
+          trap 'kill "$weston_pid"' EXIT
           for i in $(seq 100); do [ -S "$XDG_RUNTIME_DIR/wayland-ci" ] && break; sleep 0.1; done
-          VK_INSTANCE_LAYERS=$VALIDATE guile -L . tests/wayland-presentation.scm
+          VK_INSTANCE_LAYERS=$VALIDATE \
+            guile -L . tests/wayland-presentation.scm 2>&1 | tee wayland.txt
           VK_INSTANCE_LAYERS=$VALIDATE \
             timeout 300 guile -L . examples/cube/cube.scm --frames 60 2>&1 | tee cube.txt
-          ! grep -q 'Validation Error' cube.txt
-          kill "$weston_pid"
+          if grep -q 'Validation Error' wayland.txt cube.txt; then exit 1; fi
 
       - name: Build the manual
         run: |

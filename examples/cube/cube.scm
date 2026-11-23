@@ -677,6 +677,7 @@
 (define swapchain 0)
 (define extent-width 0)
 (define extent-height 0)
+(define made-for-size #f)                 ; the window size the swapchain was made for
 (define swapchain-images #())
 (define swapchain-views #())
 (define render-done #())
@@ -754,6 +755,7 @@
              (set! swapchain new-swapchain)
              (set! extent-width w)
              (set! extent-height h)
+             (set! made-for-size (wayland-window-size window))
              (set! swapchain-images
                    (call-with-values
                        (lambda () (enumerate 8 (lambda (count items)
@@ -963,8 +965,9 @@
 ;; Draw one frame.  Returns #t if a frame was drawn, #f to retry at once
 ;; (the swapchain was out of date), or 'idle when no swapchain can be made.
 (define (draw-frame! frame)
-  (unless (and (= (car (wayland-window-size window)) extent-width)
-               (= (cdr (wayland-window-size window)) extent-height))
+;; The extent may be clamped to the device's limits, so compare with the
+  ;; window size the swapchain was made for.
+  (unless (equal? (wayland-window-size window) made-for-size)
     (set! swapchain-stale? #t))
   (when swapchain-stale?
     (check 'vkDeviceWaitIdle (vk:device-wait-idle device))
