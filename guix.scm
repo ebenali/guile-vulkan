@@ -23,7 +23,7 @@
 
 (package
   (name "guile-vulkan")
-  (version "0.1.0-git")
+  (version "0.1.0")
   (source (local-file %source-directory "guile-vulkan-checkout"
                       #:recursive? #t
                       #:select? (git-predicate %source-directory)))

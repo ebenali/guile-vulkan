@@ -1,0 +1,60 @@
+guile-vulkan NEWS                                    -*- outline -*-
+
+* Changes in 0.1.0 (2026-11-23)
+
+The first release.
+
+** Bindings
+
+Every type, constant and function of Vulkan 1.4.363, generated from the
+Vulkan headers by generate.scm (a CastXML parse read with (sxml simple)).
+They need only Guile 3.0 and a Vulkan loader: no C compiler and no
+other Guile libraries.
+
+- Modules: (vulkan) for the core API, (vulkan constants), and
+  (vulkan xlib), (vulkan xcb), (vulkan wayland), (vulkan win32) for the
+  window-system extensions.
+- Names follow chez-vulkan's: vk:create-instance,
+  vk:instance-create-info, vk:structure-type-instance-create-info.  CI
+  checks that the two bind the same API.
+- Structs are bytevectors.  vk-ref, vk-set!, vk-new, make-vk,
+  vk-sizeof and vk-offset compile to direct bytevector accesses at
+  constant offsets, through nested structs, arrays and bitfields.
+- Pointer fields and pointer arguments accept bytevectors, strings and
+  #f, and keep them alive while Vulkan may use them, so nested vk-new
+  forms are safe.
+- The functions every loader exports are bound directly.  Every
+  function also has a vk:load-* procedure that fetches it at run time,
+  returning #f when it is not available.
+- The loader is found under its name on GNU/Linux, Windows and macOS.
+
+** (vulkan compute): GPU tensors
+
+1-D and 2-D float32 tensors in GPU memory, with matmul (with
+transposes and scaling), elementwise and row-broadcast arithmetic, ReLU
+and its gradient, exp, tanh, sigmoid, row softmax and row sums.
+
+- Operations are recorded and submitted in batches; reading a tensor
+  back runs everything it depends on.
+- Tensors are freed by the garbage collector once the GPU is done with
+  them, or with tensor-free!.  Their buffers are pooled for reuse.
+- Collections are forced as GPU memory is used, near the device's
+  allocation limit, and when an allocation fails.
+- The shaders are compiled to SPIR-V and embedded in the module.
+
+** Examples
+
+- compute: a compute shader squaring 1000 floats, with the raw API.
+- gears: the classic gears in an X11 window, with dynamic rendering.
+- cube: a lit, textured, mipmapped cube in a native Wayland window,
+  using only libwayland-client.
+- spirals: a neural network trained on the GPU with (vulkan compute).
+
+** Documentation, packaging and tests
+
+- A Texinfo manual, doc/guile-vulkan.texi.
+- A Guix package definition, guix.scm, that installs the manual.
+- Tests of (vulkan compute) against plain Guile, of the XCB and Wayland
+  modules, and of the API against chez-vulkan.
+- CI that regenerates the bindings and runs the tests and examples on
+  Mesa's software driver.
