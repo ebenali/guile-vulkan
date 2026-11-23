@@ -135,6 +135,12 @@ Run from the repository root:
 
 - `guile -L . examples/compute/compute.scm [device-index]`: squares 1000
   floats with a compute shader and checks the result.
+- `guile -L . examples/gears/gears.scm [--device N] [--novsync]`: the
+  classic three spinning gears in an X11 window (XWayland on Wayland
+  desktops), with Vulkan 1.3 dynamic rendering. Arrow keys and `z`/`Z`
+  rotate the view, Esc quits. It needs only libX11; the Xlib bindings are in
+  `examples/x11.scm`, which describes X's event structs with
+  `define-vk-struct`.
 
 Tests, also run from the repository root: `guile -L . tests/compute.scm
 [device-index]` checks every `(vulkan compute)` operation against plain
