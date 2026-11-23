@@ -113,7 +113,9 @@ small neural network needs:
 Operations are queued on the GPU rather than run one by one. Reading a
 result (`tensor->f32vector`, `tensor->list`) or calling `compute-flush!`
 submits everything queued and waits. Tensors are freed by the garbage
-collector, once the GPU is done with them, or with `tensor-free!`.
+collector, once the GPU is done with them, or with `tensor-free!`. Their
+buffers are kept for new tensors of the same size (up to 256 MiB), so a
+training loop doesn't allocate GPU memory every step.
 Guile's collector doesn't see GPU memory, so the module forces a collection
 to free unreferenced tensors in three cases: after every 256 MiB of tensors
 allocated; when the number of live allocations nears the device's limit
@@ -155,6 +157,10 @@ Run from the repository root:
   builds the xdg-shell interface tables in Scheme and receives events
   through `procedure->pointer` callbacks. It shows texture upload with
   mipmaps, a sampler and a descriptor set.
+- [`examples/spirals`](examples/spirals): `guile -L .
+  examples/spirals/spirals.scm [--device N]` trains a small neural network
+  on the GPU with `(vulkan compute)` to tell three interleaved spirals
+  apart, then draws what it learned.
 
 Tests, also run from the repository root: `guile -L . tests/compute.scm
 [device-index]` checks every `(vulkan compute)` operation against plain

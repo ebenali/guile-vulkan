@@ -13,7 +13,9 @@
 ;;; reading a tensor back (tensor->f32vector, tensor->list) or
 ;;; compute-flush! submits everything recorded and waits.  Tensors are
 ;;; freed by the garbage collector (or tensor-free!), once the GPU is done
-;;; with them.  The collector does not see GPU memory, so a collection is
+;;; with them, and their buffers reused for new tensors of the same size
+;;; (up to pool-limit-bytes are kept), so a training loop does not
+;;; allocate GPU memory every step.  The collector does not see GPU memory, so a collection is
 ;;; forced to free the unreferenced ones after every gc-threshold-bytes of
 ;;; tensors, when the live allocations near the device's limit (as low as
 ;;; 4096 on some drivers), and when an allocation fails for lack of memory
@@ -105,6 +107,8 @@
   (max-allocations context-max-allocations set-context-max-allocations!)
   (live-tensors context-live-tensors set-context-live-tensors!)       ; weak: marked freed on destroy
   (buffers context-buffers set-context-buffers!)                    ; every live buffer -> memory
+  (pool context-pool set-context-pool!)                             ; bytes -> ((buffer . memory) ...)
+  (pool-bytes context-pool-bytes set-context-pool-bytes!)
   (destroyed? context-destroyed? set-context-destroyed?!))
 
 (define (device-type-rank type)                     ; lower is better
@@ -238,6 +242,8 @@ lowers the device's limit on live memory allocations (for testing)."
            (if max-allocations (min limit max-allocations) limit)))
     (set-context-live-tensors! ctx (make-weak-key-hash-table))
     (set-context-buffers! ctx (make-hash-table))
+    (set-context-pool! ctx (make-hash-table))
+    (set-context-pool-bytes! ctx 0)
     (set-context-destroyed?! ctx #f)
     ctx))
 
@@ -399,6 +405,8 @@ waited for the GPU to finish (staging buffers, collected tensors)."
       (hash-for-each (lambda (t _) (forget-tensor-memory! t)) (context-live-tensors ctx))
       (for-each (match-lambda ((buffer . memory) (free-buffer ctx buffer memory)))
                 (hash-map->list cons (context-buffers ctx)))
+      (hash-clear! (context-pool ctx))
+      (set-context-pool-bytes! ctx 0)
       (hash-for-each (lambda (name k) (destroy-kernel ctx k)) (context-kernels ctx))
       (vk:destroy-descriptor-pool device (context-descriptor-pool ctx) #f)
       (vk:destroy-fence device (context-fence ctx) #f)
@@ -579,11 +587,41 @@ waited for the GPU to finish (staging buffers, collected tensors)."
   (set-tensor-buffer! t #f)
   (set-tensor-memory! t #f))
 
+;; Called once the GPU is done with T: keeps its buffer for reuse if the
+;; pool has room, else frees it.
 (define (release-tensor! t)
   (when (tensor-buffer t)
-    (free-buffer (tensor-context t) (tensor-buffer t) (tensor-memory t))
+    (let* ((ctx (tensor-context t))
+           (bytes (* 4 (tensor-size t))))
+      (if (and (not (context-destroyed? ctx))
+               (<= (+ bytes (context-pool-bytes ctx)) pool-limit-bytes))
+          (begin
+            (hashv-set! (context-pool ctx) bytes
+                        (cons (cons (tensor-buffer t) (tensor-memory t))
+                              (hashv-ref (context-pool ctx) bytes '())))
+            (set-context-pool-bytes! ctx (+ bytes (context-pool-bytes ctx))))
+          (free-buffer ctx (tensor-buffer t) (tensor-memory t))))
     (set-tensor-buffer! t #f)
     (set-tensor-memory! t #f)))
+
+;; Freed tensors' buffers kept for reuse, at most this many bytes.
+(define pool-limit-bytes (* 256 1024 1024))
+
+;; A pooled buffer of BYTES => (buffer . memory), or #f.
+(define (pool-take! ctx bytes)
+  (match (hashv-ref (context-pool ctx) bytes '())
+    (() #f)
+    ((entry . rest)
+     (hashv-set! (context-pool ctx) bytes rest)
+     (set-context-pool-bytes! ctx (- (context-pool-bytes ctx) bytes))
+     entry)))
+
+(define (drain-pool! ctx)
+  (hash-for-each (lambda (bytes entries)
+                   (for-each (match-lambda ((buffer . memory) (free-buffer ctx buffer memory))) entries))
+                 (context-pool ctx))
+  (hash-clear! (context-pool ctx))
+  (set-context-pool-bytes! ctx 0))
 
 ;; The collector cannot see GPU memory: after this many bytes of tensors,
 ;; a collection is forced (and its garbage freed by a flush).
@@ -592,7 +630,8 @@ waited for the GPU to finish (staging buffers, collected tensors)."
 (define (collect-garbage! ctx)
   (set-context-bytes-allocated! ctx 0)
   (gc)
-  (compute-flush! ctx))                 ; frees the tensors the collector found
+  (compute-flush! ctx)                  ; releases the tensors the collector found
+  (drain-pool! ctx))                    ; and really frees their memory
 
 ;; An uninitialized tensor of SHAPE on CTX.
 (define (allocate-tensor ctx shape)
@@ -605,19 +644,23 @@ waited for the GPU to finish (staging buffers, collected tensors)."
                                           vk:buffer-usage-transfer-src-bit
                                           vk:buffer-usage-transfer-dst-bit)
                                   vk:memory-property-device-local-bit))))
-    (set-context-bytes-allocated! ctx (+ bytes (context-bytes-allocated ctx)))
+    (unless (pair? (hashv-ref (context-pool ctx) bytes '()))   ; reuse counts as nothing new
+      (set-context-bytes-allocated! ctx (+ bytes (context-bytes-allocated ctx))))
     (when (or (> (context-bytes-allocated ctx) gc-threshold-bytes)
               ;; Leave a quarter of the allocations for staging buffers and slack.
               (>= (* 4 (compute-context-allocation-count ctx)) (* 3 (context-max-allocations ctx))))
       (collect-garbage! ctx))
     (call-with-values
         (lambda ()
-          (call-with-values allocate
-            (lambda (buffer memory)
-              (if buffer
-                  (values buffer memory)
-                  (begin (collect-garbage! ctx)      ; out of memory: free garbage, retry once
-                         (allocate))))))
+          (match (pool-take! ctx bytes)
+            ((buffer . memory) (values buffer memory))  ; reused: no new allocation
+            (#f
+             (call-with-values allocate
+               (lambda (buffer memory)
+                 (if buffer
+                     (values buffer memory)
+                     (begin (collect-garbage! ctx)      ; out of memory: free garbage, retry once
+                            (allocate))))))))
       (lambda (buffer memory)
         (unless buffer
           (error "out of GPU memory for a tensor of" shape))
